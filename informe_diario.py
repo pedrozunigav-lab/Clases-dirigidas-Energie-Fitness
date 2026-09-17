@@ -138,6 +138,25 @@ def normalizar_columnas_csv(df: pd.DataFrame) -> pd.DataFrame:
     return df.sort_values("Fecha_Hora").reset_index(drop=True)
 
 
+def leer_csv_desde_buffer(buffer: io.BytesIO) -> pd.DataFrame:
+    """
+    Lee un CSV probando varias codificaciones habituales, en orden:
+    UTF-8 (con y sin BOM), Windows-1252 y Latin-1. Esto evita que el script
+    se rompa cuando el CSV viene exportado desde Excel en español, que suele
+    guardar tildes y "ñ" en Windows-1252/Latin-1 en vez de UTF-8.
+    """
+    codificaciones = ["utf-8-sig", "utf-8", "cp1252", "latin-1"]
+    ultimo_error = None
+    for codificacion in codificaciones:
+        try:
+            buffer.seek(0)
+            return pd.read_csv(buffer, encoding=codificacion)
+        except UnicodeDecodeError as error:
+            ultimo_error = error
+            continue
+    raise ultimo_error
+
+
 def cargar_datos() -> pd.DataFrame:
     """Pipeline completo de carga: autenticar -> localizar -> descargar -> normalizar."""
     carpeta_id = os.environ["DRIVE_FOLDER_ID"]
@@ -146,7 +165,7 @@ def cargar_datos() -> pd.DataFrame:
     servicio = obtener_servicio_drive()
     archivo = buscar_csv_en_carpeta(servicio, carpeta_id, nombre_archivo)
     buffer = descargar_csv_drive(servicio, archivo["id"])
-    df = pd.read_csv(buffer)
+    df = leer_csv_desde_buffer(buffer)
     return normalizar_columnas_csv(df)
 
 
