@@ -1,0 +1,56 @@
+# ==============================================================================
+# Workflow: Informe diario del gimnasio
+# ------------------------------------------------------------------------------
+# Ejecuta informe_diario.py todos los días a una hora fija, sin necesidad de
+# dejar ningún ordenador encendido. GitHub Actions lo ejecuta en la nube.
+#
+# CONFIGURACIÓN NECESARIA (una sola vez):
+#   1. Sube este repositorio (con informe_diario.py y esta carpeta .github)
+#      a GitHub.
+#   2. Ve a Settings → Secrets and variables → Actions → New repository secret
+#      y crea estos 5 secretos:
+#        - GOOGLE_SERVICE_ACCOUNT_JSON  (pega el JSON completo de la cuenta de
+#          servicio, todo el contenido del fichero, tal cual)
+#        - DRIVE_FOLDER_ID              (ej: 1qIPq_nzde79ShZ-_syfIrD61FL7eV4W7)
+#        - GMAIL_USER                   (ej: pedrozunigav@gmail.com)
+#        - GMAIL_APP_PASSWORD           (contraseña de aplicación de Gmail,
+#          NO tu contraseña normal — se crea en myaccount.google.com/apppasswords,
+#          requiere tener activada la verificación en 2 pasos)
+#        - EMAIL_TO                     (ej: pedrozunigav@gmail.com)
+#
+# NOTA sobre la hora: el cron de GitHub Actions siempre va en UTC. La línea de
+# abajo (30 6 * * *) equivale a las 07:30 en horario de invierno en España y
+# a las 08:30 en horario de verano. Ajusta el número si quieres otra hora.
+# GitHub no garantiza el minuto exacto: puede haber unos minutos de retraso.
+# ==============================================================================
+
+name: Informe diario del gimnasio
+
+on:
+  schedule:
+    - cron: "30 6 * * *"
+  workflow_dispatch: {}  # permite lanzarlo manualmente desde la pestaña "Actions" para probar
+
+jobs:
+  enviar-informe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependencias
+        run: pip install pandas numpy google-api-python-client google-auth
+
+      - name: Ejecutar informe diario
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python informe_diario.py
