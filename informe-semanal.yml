@@ -1,0 +1,47 @@
+# ==============================================================================
+# Workflow: Informe semanal del gimnasio
+# ------------------------------------------------------------------------------
+# Ejecuta informe_semanal.py cada viernes, después de que se haya subido el
+# CSV de la semana a Google Drive.
+#
+# CONFIGURACIÓN NECESARIA: los mismos 5 secretos que ya tenías configurados
+# para el informe diario (GOOGLE_SERVICE_ACCOUNT_JSON, DRIVE_FOLDER_ID,
+# GMAIL_USER, GMAIL_APP_PASSWORD, EMAIL_TO) — no hace falta tocarlos.
+#
+# NOTA sobre la hora: el cron de GitHub Actions va en UTC. La línea de abajo
+# (0 17 * * 5) dispara los viernes a las 18:00 en horario de invierno en
+# España, o 19:00 en horario de verano — pensado para dar tiempo a que ya
+# hayas subido el CSV de esa semana durante el día. Ajusta la hora/el día si
+# lo prefieres distinto (el 5 al final es "viernes"; 0=domingo,...,6=sábado).
+# ==============================================================================
+
+name: Informe semanal del gimnasio
+
+on:
+  schedule:
+    - cron: "0 17 * * 5"
+  workflow_dispatch: {}  # permite lanzarlo manualmente desde la pestaña "Actions" para probar
+
+jobs:
+  enviar-informe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependencias
+        run: pip install pandas numpy google-api-python-client google-auth
+
+      - name: Ejecutar informe semanal
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python informe_semanal.py
