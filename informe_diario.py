@@ -1,18 +1,23 @@
 """
 ===============================================================================
- INFORME DIARIO POR EMAIL — RENDIMIENTO DE CLASES DEL GIMNASIO
+ INFORME SEMANAL POR EMAIL — RENDIMIENTO DE CLASES DEL GIMNASIO
 ===============================================================================
-Script standalone (NO depende de Streamlit) pensado para ejecutarse una vez
-al día de forma automática — por ejemplo con GitHub Actions (workflow
-incluido en .github/workflows/informe-diario.yml) o con un cron.
+Script standalone (NO depende de Streamlit), pensado para ejecutarse una vez
+por semana — los viernes, cuando subes el CSV de esa semana a Drive — por
+ejemplo con GitHub Actions (workflow en .github/workflows/informe-semanal.yml).
 
 Qué hace:
-    1. Descarga el CSV más reciente de la carpeta de Google Drive (misma
-       cuenta de servicio que usa el dashboard).
+    1. Descarga el CSV más reciente de la carpeta de Google Drive.
     2. Calcula las mismas métricas que el dashboard (% ocupación, tasa de
        cancelación).
-    3. Construye un email en HTML con: resumen del día anterior, comparativa
-       semana a semana (WoW) y el top 3 de clases y monitores.
+    3. Construye un email en HTML con:
+         - Ranking de ocupación por entrenador (semana en curso).
+         - Comparativa por entrenador y clase: semana actual vs. semana
+           anterior (mismo entrenador, misma clase).
+         - Comportamiento mensual por entrenador y clase: mes en curso vs.
+           mes anterior.
+         - Comparativa interanual: mes en curso vs. mismo mes del año
+           anterior (global y por entrenador).
     4. Lo envía por Gmail (SMTP con contraseña de aplicación).
 
 Variables de entorno necesarias:
@@ -36,7 +41,7 @@ Probarlo en local:
     export GMAIL_USER="pedrozunigav@gmail.com"
     export GMAIL_APP_PASSWORD="xxxx xxxx xxxx xxxx"
     export EMAIL_TO="pedrozunigav@gmail.com"
-    python informe_diario.py
+    python informe_semanal.py
 ===============================================================================
 """
 
@@ -243,104 +248,224 @@ def calcular_metricas(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ==============================================================================
-# 3. CONSTRUCCIÓN DEL INFORME (día anterior + WoW + tops históricos)
+# 3. CONSTRUCCIÓN DEL INFORME SEMANAL
 # ==============================================================================
 def _fmt_pct(x) -> str:
     return f"{x:.1f} %" if pd.notna(x) else "—"
 
 
-def construir_informe_html(df: pd.DataFrame, fecha_referencia: pd.Timestamp) -> str:
-    """
-    Construye el HTML del email a partir de tres bloques:
-      - Resumen y detalle del día anterior a `fecha_referencia`.
-      - Comparativa semana a semana (WoW) de la semana que contiene esa fecha.
-      - Top 3 histórico de clases y monitores por % de ocupación.
-    """
-    ayer = (fecha_referencia - timedelta(days=1)).date()
-    df_ayer = df[df["Fecha_Hora"].dt.date == ayer]
+def _limites_semana(fecha_referencia: pd.Timestamp):
+    """Devuelve (inicio, fin) de la semana ISO que contiene `fecha_referencia`."""
+    inicio = fecha_referencia - pd.Timedelta(days=fecha_referencia.weekday())
+    fin = inicio + pd.Timedelta(days=6, hours=23, minutes=59, seconds=59)
+    return inicio, fin
 
-    # --- Bloque: resumen de ayer ----------------------------------------------
-    if df_ayer.empty:
-        bloque_ayer = "<p>No hubo clases registradas ayer (o los datos aún no se han actualizado).</p>"
-    else:
-        asistencia_total = int(df_ayer["Asistentes_Reales"].sum())
-        ocupacion_media = df_ayer["Pct_Ocupacion"].mean()
-        cancelacion_media = df_ayer["Tasa_Cancelacion"].mean()
-        n_clases = len(df_ayer)
 
-        filas_clase = "".join(
-            f"<tr><td>{fila.Fecha_Hora.strftime('%H:%M')}</td><td>{fila.Nombre_Clase}</td>"
-            f"<td>{fila.Nombre_Monitor}</td>"
-            f"<td>{fila.Asistentes_Reales}/{fila.Capacidad_Máxima_Clase}</td>"
-            f"<td>{_fmt_pct(fila.Pct_Ocupacion)}</td></tr>"
-            for fila in df_ayer.sort_values("Fecha_Hora").itertuples()
+def _tabla_html(encabezados, filas) -> str:
+    """Genera una tabla HTML simple a partir de una lista de encabezados y filas."""
+    ths = "".join(f"<th>{h}</th>" for h in encabezados)
+    trs = "".join(
+        "<tr>" + "".join(f"<td>{valor}</td>" for valor in fila) + "</tr>"
+        for fila in filas
+    )
+    return f"""
+    <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse; width:100%; font-size:13px;">
+        <tr style="background:#1f2937;color:#ffffff;">{ths}</tr>
+        {trs}
+    </table>
+    """
+
+
+def bloque_ranking_entrenadores(df_semana_actual: pd.DataFrame) -> str:
+    """
+    Ranking de ocupación media por entrenador, calculado sobre la semana en
+    curso (la que se acaba de subir). De más a menos ocupación.
+    """
+    if df_semana_actual.empty:
+        return "<p>No hay clases registradas esta semana.</p>"
+
+    ranking = (
+        df_semana_actual.groupby("Nombre_Monitor")
+        .agg(
+            Ocupacion_Media=("Pct_Ocupacion", "mean"),
+            Asistencia_Total=("Asistentes_Reales", "sum"),
+            Num_Clases=("Nombre_Monitor", "count"),
         )
+        .round(1)
+        .sort_values("Ocupacion_Media", ascending=False)
+    )
 
-        bloque_ayer = f"""
-        <p><b>Clases impartidas:</b> {n_clases} &nbsp;|&nbsp;
-           <b>Asistencia total:</b> {asistencia_total} &nbsp;|&nbsp;
-           <b>Ocupación media:</b> {_fmt_pct(ocupacion_media)} &nbsp;|&nbsp;
-           <b>Cancelación media:</b> {_fmt_pct(cancelacion_media)}</p>
-        <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse; width:100%;">
-            <tr style="background:#1f2937;color:#ffffff;">
-                <th>Hora</th><th>Clase</th><th>Monitor</th><th>Asistentes</th><th>% Ocupación</th>
-            </tr>
-            {filas_clase}
-        </table>
-        """
+    filas = [
+        (i + 1, monitor, _fmt_pct(fila.Ocupacion_Media), int(fila.Asistencia_Total), int(fila.Num_Clases))
+        for i, (monitor, fila) in enumerate(ranking.itertuples(name="Fila", index=True))
+    ]
+    return _tabla_html(
+        ["#", "Entrenador", "% Ocupación media", "Asistencia total", "Clases impartidas"],
+        filas,
+    )
 
-    # --- Bloque: comparativa WoW ----------------------------------------------
-    inicio_semana_actual = fecha_referencia - pd.Timedelta(days=fecha_referencia.weekday())
-    fin_semana_actual = inicio_semana_actual + pd.Timedelta(days=6, hours=23, minutes=59)
-    inicio_semana_anterior = inicio_semana_actual - pd.Timedelta(days=7)
-    fin_semana_anterior = inicio_semana_actual - pd.Timedelta(seconds=1)
 
-    df_actual = df[(df["Fecha_Hora"] >= inicio_semana_actual) & (df["Fecha_Hora"] <= fin_semana_actual)]
-    df_anterior = df[(df["Fecha_Hora"] >= inicio_semana_anterior) & (df["Fecha_Hora"] <= fin_semana_anterior)]
+def bloque_comparativa_wow_entrenador_clase(df: pd.DataFrame, fecha_referencia: pd.Timestamp) -> str:
+    """
+    Para cada combinación (entrenador, clase), compara la ocupación de la
+    semana en curso frente a la misma combinación en la semana anterior.
+    Solo entran combinaciones que tuvieron clase en la semana actual.
+    """
+    inicio_actual, fin_actual = _limites_semana(fecha_referencia)
+    inicio_anterior, fin_anterior = _limites_semana(fecha_referencia - pd.Timedelta(days=7))
 
-    asistencia_actual = int(df_actual["Asistentes_Reales"].sum())
-    asistencia_anterior = int(df_anterior["Asistentes_Reales"].sum())
-    ocupacion_actual = df_actual["Pct_Ocupacion"].mean() if len(df_actual) else np.nan
-    ocupacion_anterior = df_anterior["Pct_Ocupacion"].mean() if len(df_anterior) else np.nan
+    df_actual = df[(df["Fecha_Hora"] >= inicio_actual) & (df["Fecha_Hora"] <= fin_actual)]
+    df_anterior = df[(df["Fecha_Hora"] >= inicio_anterior) & (df["Fecha_Hora"] <= fin_anterior)]
 
-    delta_asistencia = asistencia_actual - asistencia_anterior
-    flecha = "🔺" if delta_asistencia >= 0 else "🔻"
+    if df_actual.empty:
+        return "<p>No hay clases registradas esta semana.</p>"
 
-    bloque_wow = f"""
-    <p><b>Asistencia semana en curso:</b> {asistencia_actual}
-       ({flecha} {delta_asistencia:+d} vs. semana anterior: {asistencia_anterior})<br>
-       <b>Ocupación media semana en curso:</b> {_fmt_pct(ocupacion_actual)}
-       (semana anterior: {_fmt_pct(ocupacion_anterior)})</p>
+    resumen_actual = df_actual.groupby(["Nombre_Monitor", "Nombre_Clase"])["Pct_Ocupacion"].mean().round(1)
+    resumen_anterior = df_anterior.groupby(["Nombre_Monitor", "Nombre_Clase"])["Pct_Ocupacion"].mean().round(1)
+
+    filas = []
+    for (monitor, clase), ocupacion_actual in resumen_actual.sort_values(ascending=False).items():
+        ocupacion_anterior = resumen_anterior.get((monitor, clase), np.nan)
+        if pd.notna(ocupacion_anterior):
+            delta = round(ocupacion_actual - ocupacion_anterior, 1)
+            flecha = "🔺" if delta >= 0 else "🔻"
+            delta_txt = f"{flecha} {delta:+.1f} p.p."
+        else:
+            delta_txt = "— (sin datos la semana pasada)"
+        filas.append((monitor, clase, _fmt_pct(ocupacion_actual), _fmt_pct(ocupacion_anterior), delta_txt))
+
+    return _tabla_html(
+        ["Entrenador", "Clase", "% Ocup. esta semana", "% Ocup. semana pasada", "Variación"],
+        filas,
+    )
+
+
+def bloque_comportamiento_mensual(df: pd.DataFrame, fecha_referencia: pd.Timestamp) -> str:
+    """
+    Para cada combinación (entrenador, clase), compara el mes en curso con
+    el mes anterior (comportamiento a lo largo del mes).
+    """
+    mes_actual, año_actual = fecha_referencia.month, fecha_referencia.year
+    fecha_mes_anterior = (fecha_referencia.replace(day=1) - pd.Timedelta(days=1))
+    mes_anterior, año_mes_anterior = fecha_mes_anterior.month, fecha_mes_anterior.year
+
+    df_mes_actual = df[(df["Año"] == año_actual) & (df["Mes"] == mes_actual)]
+    df_mes_anterior = df[(df["Año"] == año_mes_anterior) & (df["Mes"] == mes_anterior)]
+
+    if df_mes_actual.empty:
+        return "<p>No hay datos del mes en curso todavía.</p>"
+
+    resumen_actual = (
+        df_mes_actual.groupby(["Nombre_Monitor", "Nombre_Clase"])
+        .agg(Ocupacion_Media=("Pct_Ocupacion", "mean"), Asistencia_Total=("Asistentes_Reales", "sum"))
+        .round(1)
+    )
+    resumen_anterior = (
+        df_mes_anterior.groupby(["Nombre_Monitor", "Nombre_Clase"])
+        .agg(Ocupacion_Media=("Pct_Ocupacion", "mean"), Asistencia_Total=("Asistentes_Reales", "sum"))
+        .round(1)
+    )
+
+    filas = []
+    for (monitor, clase), fila_actual in resumen_actual.sort_values("Ocupacion_Media", ascending=False).iterrows():
+        if (monitor, clase) in resumen_anterior.index:
+            fila_anterior = resumen_anterior.loc[(monitor, clase)]
+            delta = round(fila_actual.Ocupacion_Media - fila_anterior.Ocupacion_Media, 1)
+            flecha = "🔺" if delta >= 0 else "🔻"
+            delta_txt = f"{flecha} {delta:+.1f} p.p."
+            ocup_anterior_txt = _fmt_pct(fila_anterior.Ocupacion_Media)
+        else:
+            delta_txt = "— (sin datos el mes pasado)"
+            ocup_anterior_txt = "—"
+        filas.append((
+            monitor, clase,
+            _fmt_pct(fila_actual.Ocupacion_Media), int(fila_actual.Asistencia_Total),
+            ocup_anterior_txt, delta_txt,
+        ))
+
+    nombre_mes_actual = fecha_referencia.strftime("%B").capitalize()
+    titulo = f"<p><b>Mes en curso:</b> {nombre_mes_actual} {año_actual} &nbsp;vs.&nbsp; mes anterior</p>"
+    tabla = _tabla_html(
+        ["Entrenador", "Clase", "% Ocup. mes en curso", "Asistencia mes en curso",
+         "% Ocup. mes anterior", "Variación"],
+        filas,
+    )
+    return titulo + tabla
+
+
+def bloque_comparativa_yoy(df: pd.DataFrame, fecha_referencia: pd.Timestamp) -> str:
+    """
+    Compara el mes en curso con el mismo mes del año anterior, a nivel
+    global y desglosado por entrenador.
+    """
+    mes_actual, año_actual = fecha_referencia.month, fecha_referencia.year
+    año_anterior = año_actual - 1
+
+    df_mes_actual = df[(df["Año"] == año_actual) & (df["Mes"] == mes_actual)]
+    df_mes_anterior = df[(df["Año"] == año_anterior) & (df["Mes"] == mes_actual)]
+
+    nombre_mes = fecha_referencia.strftime("%B").capitalize()
+
+    if df_mes_anterior.empty:
+        return f"<p>No hay datos de {nombre_mes} {año_anterior} todavía para comparar.</p>"
+
+    asistencia_actual = int(df_mes_actual["Asistentes_Reales"].sum())
+    asistencia_anterior = int(df_mes_anterior["Asistentes_Reales"].sum())
+    ocupacion_actual = df_mes_actual["Pct_Ocupacion"].mean() if len(df_mes_actual) else np.nan
+    ocupacion_anterior = df_mes_anterior["Pct_Ocupacion"].mean()
+
+    resumen_global = f"""
+    <p><b>Asistencia total:</b> {asistencia_actual} ({nombre_mes} {año_actual})
+       vs. {asistencia_anterior} ({nombre_mes} {año_anterior})<br>
+       <b>Ocupación media:</b> {_fmt_pct(ocupacion_actual)} ({año_actual})
+       vs. {_fmt_pct(ocupacion_anterior)} ({año_anterior})</p>
     """
 
-    # --- Bloque: top histórico de clases y monitores ---------------------------
-    top_clases = (
-        df.groupby("Nombre_Clase")["Pct_Ocupacion"].mean().round(1)
-        .sort_values(ascending=False).head(3)
+    # --- Desglose por entrenador --------------------------------------------
+    resumen_actual_monitor = df_mes_actual.groupby("Nombre_Monitor")["Pct_Ocupacion"].mean().round(1)
+    resumen_anterior_monitor = df_mes_anterior.groupby("Nombre_Monitor")["Pct_Ocupacion"].mean().round(1)
+
+    filas = []
+    monitores = sorted(set(resumen_actual_monitor.index) | set(resumen_anterior_monitor.index))
+    for monitor in monitores:
+        ocup_actual = resumen_actual_monitor.get(monitor, np.nan)
+        ocup_anterior = resumen_anterior_monitor.get(monitor, np.nan)
+        if pd.notna(ocup_actual) and pd.notna(ocup_anterior):
+            delta = round(ocup_actual - ocup_anterior, 1)
+            flecha = "🔺" if delta >= 0 else "🔻"
+            delta_txt = f"{flecha} {delta:+.1f} p.p."
+        else:
+            delta_txt = "—"
+        filas.append((monitor, _fmt_pct(ocup_actual), _fmt_pct(ocup_anterior), delta_txt))
+
+    tabla_monitor = _tabla_html(
+        ["Entrenador", f"% Ocup. {nombre_mes} {año_actual}", f"% Ocup. {nombre_mes} {año_anterior}", "Variación"],
+        filas,
     )
-    top_monitores = (
-        df.groupby("Nombre_Monitor")["Pct_Ocupacion"].mean().round(1)
-        .sort_values(ascending=False).head(3)
-    )
-    filas_top_clases = "".join(f"<li>{c}: {_fmt_pct(v)}</li>" for c, v in top_clases.items())
-    filas_top_monitores = "".join(f"<li>{m}: {_fmt_pct(v)}</li>" for m, v in top_monitores.items())
+    return resumen_global + tabla_monitor
+
+
+def construir_informe_html(df: pd.DataFrame, fecha_referencia: pd.Timestamp) -> str:
+    """Ensambla el email semanal completo a partir de los cuatro bloques."""
+    inicio_actual, fin_actual = _limites_semana(fecha_referencia)
+    df_semana_actual = df[(df["Fecha_Hora"] >= inicio_actual) & (df["Fecha_Hora"] <= fin_actual)]
 
     return f"""
     <html>
     <body style="font-family: Arial, sans-serif; color:#1f2937;">
-        <h2>🏋️ Informe diario del gimnasio — {ayer.strftime('%d/%m/%Y')}</h2>
+        <h2>🏋️ Informe semanal del gimnasio — semana del {inicio_actual.strftime('%d/%m')} al {fin_actual.strftime('%d/%m/%Y')}</h2>
 
-        <h3>📅 Resumen de ayer</h3>
-        {bloque_ayer}
+        <h3>🏆 Ranking de ocupación por entrenador (esta semana)</h3>
+        {bloque_ranking_entrenadores(df_semana_actual)}
 
-        <h3>📊 Comparativa semana a semana (WoW)</h3>
-        {bloque_wow}
+        <h3>📊 Comparativa por entrenador y clase — esta semana vs. semana pasada</h3>
+        {bloque_comparativa_wow_entrenador_clase(df, fecha_referencia)}
 
-        <h3>🏆 Top 3 clases por ocupación (histórico)</h3>
-        <ul>{filas_top_clases}</ul>
+        <h3>📅 Comportamiento mensual por entrenador y clase</h3>
+        {bloque_comportamiento_mensual(df, fecha_referencia)}
 
-        <h3>🧑‍🏫 Top 3 monitores por ocupación (histórico)</h3>
-        <ul>{filas_top_monitores}</ul>
+        <h3>📆 Comparativa interanual (mismo mes, año anterior)</h3>
+        {bloque_comparativa_yoy(df, fecha_referencia)}
 
         <p style="color:#6b7280; font-size:12px;">Informe generado automáticamente.</p>
     </body>
@@ -375,10 +500,13 @@ def main() -> None:
     df = calcular_metricas(df_raw)
 
     fecha_referencia = pd.Timestamp(datetime.now().date())
-    ayer = (fecha_referencia - timedelta(days=1)).date()
+    inicio_semana, fin_semana = _limites_semana(fecha_referencia)
 
     html = construir_informe_html(df, fecha_referencia)
-    asunto = f"🏋️ Informe diario del gimnasio — {ayer.strftime('%d/%m/%Y')}"
+    asunto = (
+        f"🏋️ Informe semanal del gimnasio — "
+        f"{inicio_semana.strftime('%d/%m')} al {fin_semana.strftime('%d/%m/%Y')}"
+    )
 
     enviar_email(asunto, html)
     print(f"Email enviado correctamente a {os.environ['EMAIL_TO']}")
