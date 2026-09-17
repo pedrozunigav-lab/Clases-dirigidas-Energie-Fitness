@@ -296,8 +296,8 @@ def bloque_ranking_entrenadores(df_semana_actual: pd.DataFrame) -> str:
     )
 
     filas = [
-        (i + 1, monitor, _fmt_pct(fila.Ocupacion_Media), int(fila.Asistencia_Total), int(fila.Num_Clases))
-        for i, (monitor, fila) in enumerate(ranking.itertuples(name="Fila", index=True))
+        (i, fila.Index, _fmt_pct(fila.Ocupacion_Media), int(fila.Asistencia_Total), int(fila.Num_Clases))
+        for i, fila in enumerate(ranking.itertuples(index=True), start=1)
     ]
     return _tabla_html(
         ["#", "Entrenador", "% Ocupación media", "Asistencia total", "Clases impartidas"],
