@@ -65,6 +65,19 @@ COLUMNAS_ESPERADAS = {
     "Cancelaciones_Última_Hora",
 }
 
+# Tu CSV real viene de un sistema de reservas con sus propios nombres de
+# columna (en vez del esquema genérico de ejemplo). Este mapeo traduce esos
+# nombres "de origen" a los canónicos que usa el resto del pipeline, así no
+# hace falta tocar el CSV en Drive cada vez que se exporta.
+MAPEO_COLUMNAS_ALTERNATIVAS = {
+    "Fecha de inicio del curso": "Fecha_Hora",
+    "Número de plazas": "Capacidad_Máxima_Clase",
+    "Actividad": "Nombre_Clase",
+    "Presente": "Asistentes_Reales",
+    "Ausente": "Cancelaciones_Última_Hora",
+    "ID del entrenador": "ID_Monitor",
+}
+
 
 # ==============================================================================
 # 1. CARGA DE DATOS DESDE DRIVE (misma lógica que el dashboard, sin Streamlit)
@@ -114,9 +127,34 @@ def descargar_csv_drive(servicio, file_id: str) -> io.BytesIO:
 
 
 def normalizar_columnas_csv(df: pd.DataFrame) -> pd.DataFrame:
-    """Valida columnas mínimas, parsea fechas y rellena IDs si faltan."""
+    """
+    Traduce las columnas reales del CSV (si vienen del sistema de reservas)
+    a los nombres canónicos, valida que no falte nada, parsea fechas y
+    rellena IDs si no vienen en el CSV.
+    """
     df = df.copy()
-    df.columns = [c.strip() for c in df.columns]
+    df.columns = [c.strip().strip('"') for c in df.columns]
+
+    # 1) Traducir columnas "de origen" -> nombres canónicos, solo si el
+    #    nombre canónico no viene ya puesto en el CSV.
+    columnas_a_renombrar = {
+        origen: destino
+        for origen, destino in MAPEO_COLUMNAS_ALTERNATIVAS.items()
+        if origen in df.columns and destino not in df.columns
+    }
+    if columnas_a_renombrar:
+        df = df.rename(columns=columnas_a_renombrar)
+
+    # 2) El nombre del monitor puede venir partido en nombre + apellidos.
+    if "Nombre_Monitor" not in df.columns:
+        if "Nombre del entrenador" in df.columns and "Apellidos del entrenador" in df.columns:
+            df["Nombre_Monitor"] = (
+                df["Nombre del entrenador"].fillna("").astype(str).str.strip()
+                + " "
+                + df["Apellidos del entrenador"].fillna("").astype(str).str.strip()
+            ).str.strip()
+        elif "Nombre del entrenador" in df.columns:
+            df["Nombre_Monitor"] = df["Nombre del entrenador"]
 
     faltantes = COLUMNAS_ESPERADAS - set(df.columns)
     if faltantes:
@@ -125,7 +163,9 @@ def normalizar_columnas_csv(df: pd.DataFrame) -> pd.DataFrame:
             f"Columnas encontradas: {sorted(df.columns)}"
         )
 
-    df["Fecha_Hora"] = pd.to_datetime(df["Fecha_Hora"], errors="raise")
+    # dayfirst=True porque las fechas del sistema de reservas vienen en
+    # formato día/mes/año, como es habitual en España.
+    df["Fecha_Hora"] = pd.to_datetime(df["Fecha_Hora"], errors="raise", dayfirst=True)
 
     if "ID_Clase" not in df.columns:
         df["ID_Clase"] = df["Nombre_Clase"].astype("category").cat.codes + 1
@@ -140,17 +180,26 @@ def normalizar_columnas_csv(df: pd.DataFrame) -> pd.DataFrame:
 
 def leer_csv_desde_buffer(buffer: io.BytesIO) -> pd.DataFrame:
     """
-    Lee un CSV probando varias codificaciones habituales, en orden:
-    UTF-8 (con y sin BOM), Windows-1252 y Latin-1. Esto evita que el script
-    se rompa cuando el CSV viene exportado desde Excel en español, que suele
-    guardar tildes y "ñ" en Windows-1252/Latin-1 en vez de UTF-8.
+    Lee un CSV probando varias codificaciones habituales (UTF-8 con y sin
+    BOM, Windows-1252, Latin-1) y detectando automáticamente el separador
+    (coma o punto y coma, típico de exportaciones de Excel en español).
     """
     codificaciones = ["utf-8-sig", "utf-8", "cp1252", "latin-1"]
     ultimo_error = None
     for codificacion in codificaciones:
         try:
             buffer.seek(0)
-            return pd.read_csv(buffer, encoding=codificacion)
+            # sep=None + engine="python" activa la detección automática del
+            # separador (csv.Sniffer). Si detecta mal y deja todo en una
+            # sola columna, reintentamos forzando ";", el más habitual en
+            # CSVs de Excel en español.
+            df = pd.read_csv(buffer, encoding=codificacion, sep=None, engine="python")
+            if df.shape[1] == 1:
+                buffer.seek(0)
+                df_punto_coma = pd.read_csv(buffer, encoding=codificacion, sep=";")
+                if df_punto_coma.shape[1] > 1:
+                    df = df_punto_coma
+            return df
         except UnicodeDecodeError as error:
             ultimo_error = error
             continue
