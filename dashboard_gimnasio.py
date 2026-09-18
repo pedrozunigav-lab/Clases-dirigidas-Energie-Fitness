@@ -91,6 +91,18 @@ MAPEO_COLUMNAS_ALTERNATIVAS = {
     "Presente": "Asistentes_Reales",
     "Ausente": "Cancelaciones_Última_Hora",
     "ID del entrenador": "ID_Monitor",
+    "Inscrito": "Inscritos",
+}
+
+# Actividades que NO son clases dirigidas normales (tours, entrenamiento
+# personal, etc.) y que se excluyen de todos los análisis y gráficos.
+# Edita esta lista si cambian los nombres exactos en el CSV.
+ACTIVIDADES_EXCLUIDAS = {
+    "motivaction be ready",
+    "motivactions despegue",
+    "presoterapia",
+    "tour",
+    "entrenamiento personal",
 }
 
 
@@ -213,6 +225,16 @@ def normalizar_columnas_csv(df: pd.DataFrame) -> pd.DataFrame:
 
     for col in ["Capacidad_Máxima_Clase", "Asistentes_Reales", "Cancelaciones_Última_Hora"]:
         df[col] = pd.to_numeric(df[col], errors="raise")
+
+    # "Inscritos" es opcional: solo viene en el CSV real (no en el dataset
+    # sintético de demo). Si está, se usa para calcular % Ocupación.
+    if "Inscritos" in df.columns:
+        df["Inscritos"] = pd.to_numeric(df["Inscritos"], errors="coerce")
+
+    # Quitar actividades que no son clases dirigidas normales (tours,
+    # entrenamiento personal, etc. — ver ACTIVIDADES_EXCLUIDAS arriba).
+    nombre_normalizado = df["Nombre_Clase"].astype(str).str.strip().str.lower()
+    df = df[~nombre_normalizado.isin(ACTIVIDADES_EXCLUIDAS)]
 
     return df.sort_values("Fecha_Hora").reset_index(drop=True)
 
@@ -407,10 +429,19 @@ def calcular_metricas(df: pd.DataFrame) -> pd.DataFrame:
     # Reservas totales = quien acabó asistiendo + quien canceló a última hora
     df["Reservas_Totales"] = df["Asistentes_Reales"] + df["Cancelaciones_Última_Hora"]
 
-    # % de Ocupación = Asistentes_Reales / Capacidad_Máxima_Clase
-    df["Pct_Ocupacion"] = (
-        df["Asistentes_Reales"] / df["Capacidad_Máxima_Clase"] * 100
-    ).round(2)
+    # % de Ocupación = Presentes / Inscritos (si el CSV trae "Inscritos";
+    # si no, se usa la capacidad máxima como respaldo, como en el dataset
+    # sintético de demo, que no tiene esa columna)
+    if "Inscritos" in df.columns:
+        df["Pct_Ocupacion"] = np.where(
+            df["Inscritos"] > 0,
+            (df["Asistentes_Reales"] / df["Inscritos"] * 100).round(2),
+            0.0,
+        )
+    else:
+        df["Pct_Ocupacion"] = (
+            df["Asistentes_Reales"] / df["Capacidad_Máxima_Clase"] * 100
+        ).round(2)
 
     # Tasa de cancelación = cancelaciones / reservas totales
     df["Tasa_Cancelacion"] = np.where(
