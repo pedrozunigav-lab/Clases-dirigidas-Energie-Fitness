@@ -50,9 +50,13 @@ import json
 import os
 import smtplib
 from datetime import datetime, timedelta
+from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
+import matplotlib
+matplotlib.use("Agg")  # backend sin pantalla: necesario para generar PNGs en un servidor/CI
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from google.oauth2 import service_account
@@ -81,6 +85,18 @@ MAPEO_COLUMNAS_ALTERNATIVAS = {
     "Presente": "Asistentes_Reales",
     "Ausente": "Cancelaciones_Última_Hora",
     "ID del entrenador": "ID_Monitor",
+    "Inscrito": "Inscritos",
+}
+
+# Actividades que NO son clases dirigidas normales (tours, entrenamiento
+# personal, etc.) y que se excluyen de todos los análisis y gráficos.
+# Edita esta lista si cambian los nombres exactos en el CSV.
+ACTIVIDADES_EXCLUIDAS = {
+    "motivaction be ready",
+    "motivactions despegue",
+    "presoterapia",
+    "tour",
+    "entrenamiento personal",
 }
 
 
@@ -180,6 +196,16 @@ def normalizar_columnas_csv(df: pd.DataFrame) -> pd.DataFrame:
     for col in ["Capacidad_Máxima_Clase", "Asistentes_Reales", "Cancelaciones_Última_Hora"]:
         df[col] = pd.to_numeric(df[col], errors="raise")
 
+    # "Inscritos" es opcional: solo viene en el CSV real (no en el dataset
+    # sintético de demo). Si está, se usa para calcular % Ocupación.
+    if "Inscritos" in df.columns:
+        df["Inscritos"] = pd.to_numeric(df["Inscritos"], errors="coerce")
+
+    # 3) Quitar actividades que no son clases dirigidas normales (tours,
+    #    entrenamiento personal, etc. — ver ACTIVIDADES_EXCLUIDAS arriba).
+    nombre_normalizado = df["Nombre_Clase"].astype(str).str.strip().str.lower()
+    df = df[~nombre_normalizado.isin(ACTIVIDADES_EXCLUIDAS)]
+
     return df.sort_values("Fecha_Hora").reset_index(drop=True)
 
 
@@ -229,9 +255,22 @@ def cargar_datos() -> pd.DataFrame:
 def calcular_metricas(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["Reservas_Totales"] = df["Asistentes_Reales"] + df["Cancelaciones_Última_Hora"]
-    df["Pct_Ocupacion"] = (
-        df["Asistentes_Reales"] / df["Capacidad_Máxima_Clase"] * 100
-    ).round(2)
+
+    # % Ocupación = Presentes / Inscritos * 100 (según los inscritos reales a
+    # la clase, no la capacidad máxima de la sala). Si el CSV no trae la
+    # columna "Inscritos" (p. ej. el dataset sintético de demo), se usa la
+    # capacidad máxima como respaldo para no romper el resto del pipeline.
+    if "Inscritos" in df.columns:
+        df["Pct_Ocupacion"] = np.where(
+            df["Inscritos"] > 0,
+            (df["Asistentes_Reales"] / df["Inscritos"] * 100).round(2),
+            0.0,
+        )
+    else:
+        df["Pct_Ocupacion"] = (
+            df["Asistentes_Reales"] / df["Capacidad_Máxima_Clase"] * 100
+        ).round(2)
+
     df["Tasa_Cancelacion"] = np.where(
         df["Reservas_Totales"] > 0,
         (df["Cancelaciones_Última_Hora"] / df["Reservas_Totales"] * 100).round(2),
@@ -276,7 +315,97 @@ def _tabla_html(encabezados, filas) -> str:
     """
 
 
-def bloque_ranking_entrenadores(df_semana_actual: pd.DataFrame) -> str:
+# Paleta de colores para los gráficos, inspirada en el estilo de los
+# informes que ya usas (barras de colores alternos, sin degradado).
+_COLORES_GRAFICO = [
+    "#38bdf8", "#5eead4", "#fde047", "#f97316", "#1f2937",
+    "#fca5a5", "#fb7185", "#1e3a8a", "#0f172a", "#0ea5e9",
+    "#2dd4bf", "#facc15", "#ef4444", "#57534e",
+]
+
+
+def _grafico_barras_horizontal(categorias, valores, titulo: str, xlabel: str = "") -> bytes:
+    """
+    Genera un PNG de barras horizontales tipo ranking (el valor más alto
+    arriba), con una barra de color distinto por categoría.
+    """
+    alto = max(2.5, 0.4 * len(categorias) + 1)
+    fig, ax = plt.subplots(figsize=(8, alto))
+    posiciones = list(range(len(categorias)))
+    colores = [_COLORES_GRAFICO[i % len(_COLORES_GRAFICO)] for i in posiciones]
+
+    ax.barh(posiciones, valores, color=colores)
+    ax.set_yticks(posiciones)
+    ax.set_yticklabels(categorias)
+    ax.invert_yaxis()  # el primero de la lista (más alto) queda arriba
+
+    for i, valor in enumerate(valores):
+        etiqueta = f"{valor:.0f}" if float(valor).is_integer() else f"{valor:.1f}"
+        ax.text(valor, i, f" {etiqueta}", va="center", fontsize=9, color="#374151")
+
+    ax.set_xlabel(xlabel)
+    ax.set_title(titulo)
+    ax.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout()
+
+    buffer = io.BytesIO()
+    fig.savefig(buffer, format="png", dpi=110)
+    plt.close(fig)
+    buffer.seek(0)
+    return buffer.read()
+
+
+def _grafico_barras_comparativo(
+    categorias, valores_actual, valores_anterior, titulo: str,
+    etiqueta_actual: str, etiqueta_anterior: str, ylabel: str = "% Ocupación",
+) -> bytes:
+    """Genera un PNG de barras verticales agrupadas: periodo actual vs. anterior."""
+    fig, ax = plt.subplots(figsize=(max(6, 0.6 * len(categorias) + 2), 4.5))
+    x = np.arange(len(categorias))
+    ancho = 0.35
+
+    ax.bar(x - ancho / 2, valores_actual, width=ancho, label=etiqueta_actual, color="#2563eb")
+    ax.bar(x + ancho / 2, valores_anterior, width=ancho, label=etiqueta_anterior, color="#93c5fd")
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(categorias, rotation=30, ha="right")
+    ax.set_ylabel(ylabel)
+    ax.set_title(titulo)
+    ax.legend()
+    ax.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout()
+
+    buffer = io.BytesIO()
+    fig.savefig(buffer, format="png", dpi=110)
+    plt.close(fig)
+    buffer.seek(0)
+    return buffer.read()
+
+
+def _imagen_html(cid: str, alt: str) -> str:
+    return f'<img src="cid:{cid}" alt="{alt}" style="max-width:100%; height:auto; margin: 8px 0;">'
+
+
+def bloque_ranking_clases(df_semana_actual: pd.DataFrame, imagenes: dict) -> str:
+    """Ranking de clases por asistencia total en la semana en curso (barras horizontales)."""
+    if df_semana_actual.empty:
+        return "<p>No hay clases registradas esta semana.</p>"
+
+    resumen = (
+        df_semana_actual.groupby("Nombre_Clase")["Asistentes_Reales"]
+        .sum()
+        .sort_values(ascending=False)
+    )
+
+    cid = "grafico_ranking_clases"
+    imagenes[cid] = _grafico_barras_horizontal(
+        list(resumen.index), list(resumen.values),
+        "Ranking de clases por asistencia (esta semana)", xlabel="Asistentes",
+    )
+    return _imagen_html(cid, "Ranking de clases por asistencia")
+
+
+def bloque_ranking_entrenadores(df_semana_actual: pd.DataFrame, imagenes: dict) -> str:
     """
     Ranking de ocupación media por entrenador, calculado sobre la semana en
     curso (la que se acaba de subir). De más a menos ocupación.
@@ -295,21 +424,29 @@ def bloque_ranking_entrenadores(df_semana_actual: pd.DataFrame) -> str:
         .sort_values("Ocupacion_Media", ascending=False)
     )
 
+    cid = "grafico_ranking_entrenadores"
+    imagenes[cid] = _grafico_barras_horizontal(
+        list(ranking.index), list(ranking["Ocupacion_Media"].values),
+        "Ranking de ocupación por entrenador (esta semana)", xlabel="% Ocupación",
+    )
+
     filas = [
         (i, fila.Index, _fmt_pct(fila.Ocupacion_Media), int(fila.Asistencia_Total), int(fila.Num_Clases))
         for i, fila in enumerate(ranking.itertuples(index=True), start=1)
     ]
-    return _tabla_html(
+    tabla = _tabla_html(
         ["#", "Entrenador", "% Ocupación media", "Asistencia total", "Clases impartidas"],
         filas,
     )
+    return _imagen_html(cid, "Ranking de entrenadores") + tabla
 
 
-def bloque_comparativa_wow_entrenador_clase(df: pd.DataFrame, fecha_referencia: pd.Timestamp) -> str:
+def bloque_comparativa_wow_entrenador_clase(df: pd.DataFrame, fecha_referencia: pd.Timestamp, imagenes: dict) -> str:
     """
     Para cada combinación (entrenador, clase), compara la ocupación de la
     semana en curso frente a la misma combinación en la semana anterior.
     Solo entran combinaciones que tuvieron clase en la semana actual.
+    También añade un gráfico agregado por entrenador (actual vs. anterior).
     """
     inicio_actual, fin_actual = _limites_semana(fecha_referencia)
     inicio_anterior, fin_anterior = _limites_semana(fecha_referencia - pd.Timedelta(days=7))
@@ -320,6 +457,21 @@ def bloque_comparativa_wow_entrenador_clase(df: pd.DataFrame, fecha_referencia: 
     if df_actual.empty:
         return "<p>No hay clases registradas esta semana.</p>"
 
+    # --- Gráfico agregado por entrenador ---------------------------------------
+    resumen_actual_monitor = df_actual.groupby("Nombre_Monitor")["Pct_Ocupacion"].mean().round(1)
+    resumen_anterior_monitor = df_anterior.groupby("Nombre_Monitor")["Pct_Ocupacion"].mean().round(1)
+    monitores = sorted(resumen_actual_monitor.index, key=lambda m: resumen_actual_monitor[m], reverse=True)
+
+    cid = "grafico_wow_entrenadores"
+    imagenes[cid] = _grafico_barras_comparativo(
+        monitores,
+        [resumen_actual_monitor.get(m, 0) for m in monitores],
+        [resumen_anterior_monitor.get(m, 0) for m in monitores],
+        "Ocupación media por entrenador: esta semana vs. semana pasada",
+        "Esta semana", "Semana pasada",
+    )
+
+    # --- Tabla de detalle por entrenador + clase --------------------------------
     resumen_actual = df_actual.groupby(["Nombre_Monitor", "Nombre_Clase"])["Pct_Ocupacion"].mean().round(1)
     resumen_anterior = df_anterior.groupby(["Nombre_Monitor", "Nombre_Clase"])["Pct_Ocupacion"].mean().round(1)
 
@@ -334,16 +486,18 @@ def bloque_comparativa_wow_entrenador_clase(df: pd.DataFrame, fecha_referencia: 
             delta_txt = "— (sin datos la semana pasada)"
         filas.append((monitor, clase, _fmt_pct(ocupacion_actual), _fmt_pct(ocupacion_anterior), delta_txt))
 
-    return _tabla_html(
+    tabla = _tabla_html(
         ["Entrenador", "Clase", "% Ocup. esta semana", "% Ocup. semana pasada", "Variación"],
         filas,
     )
+    return _imagen_html(cid, "Comparativa semanal por entrenador") + tabla
 
 
-def bloque_comportamiento_mensual(df: pd.DataFrame, fecha_referencia: pd.Timestamp) -> str:
+def bloque_comportamiento_mensual(df: pd.DataFrame, fecha_referencia: pd.Timestamp, imagenes: dict) -> str:
     """
     Para cada combinación (entrenador, clase), compara el mes en curso con
-    el mes anterior (comportamiento a lo largo del mes).
+    el mes anterior (comportamiento a lo largo del mes), con un gráfico
+    agregado por entrenador.
     """
     mes_actual, año_actual = fecha_referencia.month, fecha_referencia.year
     fecha_mes_anterior = (fecha_referencia.replace(day=1) - pd.Timedelta(days=1))
@@ -355,6 +509,22 @@ def bloque_comportamiento_mensual(df: pd.DataFrame, fecha_referencia: pd.Timesta
     if df_mes_actual.empty:
         return "<p>No hay datos del mes en curso todavía.</p>"
 
+    # --- Gráfico agregado por entrenador ---------------------------------------
+    resumen_actual_monitor = df_mes_actual.groupby("Nombre_Monitor")["Pct_Ocupacion"].mean().round(1)
+    resumen_anterior_monitor = df_mes_anterior.groupby("Nombre_Monitor")["Pct_Ocupacion"].mean().round(1)
+    monitores = sorted(resumen_actual_monitor.index, key=lambda m: resumen_actual_monitor[m], reverse=True)
+
+    nombre_mes_actual = fecha_referencia.strftime("%B").capitalize()
+    cid = "grafico_mensual_entrenadores"
+    imagenes[cid] = _grafico_barras_comparativo(
+        monitores,
+        [resumen_actual_monitor.get(m, 0) for m in monitores],
+        [resumen_anterior_monitor.get(m, 0) for m in monitores],
+        f"Ocupación media por entrenador: {nombre_mes_actual} vs. mes anterior",
+        nombre_mes_actual, "Mes anterior",
+    )
+
+    # --- Tabla de detalle por entrenador + clase --------------------------------
     resumen_actual = (
         df_mes_actual.groupby(["Nombre_Monitor", "Nombre_Clase"])
         .agg(Ocupacion_Media=("Pct_Ocupacion", "mean"), Asistencia_Total=("Asistentes_Reales", "sum"))
@@ -383,20 +553,19 @@ def bloque_comportamiento_mensual(df: pd.DataFrame, fecha_referencia: pd.Timesta
             ocup_anterior_txt, delta_txt,
         ))
 
-    nombre_mes_actual = fecha_referencia.strftime("%B").capitalize()
     titulo = f"<p><b>Mes en curso:</b> {nombre_mes_actual} {año_actual} &nbsp;vs.&nbsp; mes anterior</p>"
     tabla = _tabla_html(
         ["Entrenador", "Clase", "% Ocup. mes en curso", "Asistencia mes en curso",
          "% Ocup. mes anterior", "Variación"],
         filas,
     )
-    return titulo + tabla
+    return titulo + _imagen_html(cid, "Comportamiento mensual por entrenador") + tabla
 
 
-def bloque_comparativa_yoy(df: pd.DataFrame, fecha_referencia: pd.Timestamp) -> str:
+def bloque_comparativa_yoy(df: pd.DataFrame, fecha_referencia: pd.Timestamp, imagenes: dict) -> str:
     """
     Compara el mes en curso con el mismo mes del año anterior, a nivel
-    global y desglosado por entrenador.
+    global y desglosado por entrenador, con gráfico comparativo.
     """
     mes_actual, año_actual = fecha_referencia.month, fecha_referencia.year
     año_anterior = año_actual - 1
@@ -421,12 +590,21 @@ def bloque_comparativa_yoy(df: pd.DataFrame, fecha_referencia: pd.Timestamp) -> 
        vs. {_fmt_pct(ocupacion_anterior)} ({año_anterior})</p>
     """
 
-    # --- Desglose por entrenador --------------------------------------------
+    # --- Desglose y gráfico por entrenador --------------------------------------
     resumen_actual_monitor = df_mes_actual.groupby("Nombre_Monitor")["Pct_Ocupacion"].mean().round(1)
     resumen_anterior_monitor = df_mes_anterior.groupby("Nombre_Monitor")["Pct_Ocupacion"].mean().round(1)
+    monitores = sorted(set(resumen_actual_monitor.index) | set(resumen_anterior_monitor.index))
+
+    cid = "grafico_yoy_entrenadores"
+    imagenes[cid] = _grafico_barras_comparativo(
+        monitores,
+        [resumen_actual_monitor.get(m, 0) for m in monitores],
+        [resumen_anterior_monitor.get(m, 0) for m in monitores],
+        f"Ocupación por entrenador — {nombre_mes}: {año_actual} vs. {año_anterior}",
+        f"{nombre_mes} {año_actual}", f"{nombre_mes} {año_anterior}",
+    )
 
     filas = []
-    monitores = sorted(set(resumen_actual_monitor.index) | set(resumen_anterior_monitor.index))
     for monitor in monitores:
         ocup_actual = resumen_actual_monitor.get(monitor, np.nan)
         ocup_anterior = resumen_anterior_monitor.get(monitor, np.nan)
@@ -442,50 +620,74 @@ def bloque_comparativa_yoy(df: pd.DataFrame, fecha_referencia: pd.Timestamp) -> 
         ["Entrenador", f"% Ocup. {nombre_mes} {año_actual}", f"% Ocup. {nombre_mes} {año_anterior}", "Variación"],
         filas,
     )
-    return resumen_global + tabla_monitor
+    return resumen_global + _imagen_html(cid, "Comparativa interanual por entrenador") + tabla_monitor
 
 
-def construir_informe_html(df: pd.DataFrame, fecha_referencia: pd.Timestamp) -> str:
-    """Ensambla el email semanal completo a partir de los cuatro bloques."""
+def construir_informe_html(df: pd.DataFrame, fecha_referencia: pd.Timestamp):
+    """
+    Ensambla el email semanal completo a partir de los cinco bloques.
+    Devuelve (html, imagenes) — imagenes es un dict {cid: bytes_png} que
+    hay que incrustar en el email junto al HTML.
+    """
+    imagenes: dict = {}
+
     inicio_actual, fin_actual = _limites_semana(fecha_referencia)
     df_semana_actual = df[(df["Fecha_Hora"] >= inicio_actual) & (df["Fecha_Hora"] <= fin_actual)]
 
-    return f"""
+    html = f"""
     <html>
     <body style="font-family: Arial, sans-serif; color:#1f2937;">
         <h2>🏋️ Informe semanal del gimnasio — semana del {inicio_actual.strftime('%d/%m')} al {fin_actual.strftime('%d/%m/%Y')}</h2>
 
+        <h3>🥇 Ranking de clases por asistencia (esta semana)</h3>
+        {bloque_ranking_clases(df_semana_actual, imagenes)}
+
         <h3>🏆 Ranking de ocupación por entrenador (esta semana)</h3>
-        {bloque_ranking_entrenadores(df_semana_actual)}
+        {bloque_ranking_entrenadores(df_semana_actual, imagenes)}
 
         <h3>📊 Comparativa por entrenador y clase — esta semana vs. semana pasada</h3>
-        {bloque_comparativa_wow_entrenador_clase(df, fecha_referencia)}
+        {bloque_comparativa_wow_entrenador_clase(df, fecha_referencia, imagenes)}
 
         <h3>📅 Comportamiento mensual por entrenador y clase</h3>
-        {bloque_comportamiento_mensual(df, fecha_referencia)}
+        {bloque_comportamiento_mensual(df, fecha_referencia, imagenes)}
 
         <h3>📆 Comparativa interanual (mismo mes, año anterior)</h3>
-        {bloque_comparativa_yoy(df, fecha_referencia)}
+        {bloque_comparativa_yoy(df, fecha_referencia, imagenes)}
 
         <p style="color:#6b7280; font-size:12px;">Informe generado automáticamente.</p>
     </body>
     </html>
     """
+    return html, imagenes
 
 
 # ==============================================================================
 # 4. ENVÍO DEL EMAIL (Gmail SMTP con contraseña de aplicación)
 # ==============================================================================
-def enviar_email(asunto: str, html: str) -> None:
+def enviar_email(asunto: str, html: str, imagenes: dict) -> None:
+    """
+    Envía el email en HTML con las imágenes de `imagenes` ({cid: bytes_png})
+    incrustadas inline (no como adjuntos sueltos), referenciadas en el HTML
+    como <img src="cid:NOMBRE">.
+    """
     gmail_user = os.environ["GMAIL_USER"]
     gmail_password = os.environ["GMAIL_APP_PASSWORD"]
     destinatarios = [d.strip() for d in os.environ["EMAIL_TO"].split(",") if d.strip()]
 
-    mensaje = MIMEMultipart("alternative")
+    mensaje = MIMEMultipart("related")
     mensaje["Subject"] = asunto
     mensaje["From"] = gmail_user
     mensaje["To"] = ", ".join(destinatarios)
-    mensaje.attach(MIMEText(html, "html", "utf-8"))
+
+    parte_alternativa = MIMEMultipart("alternative")
+    parte_alternativa.attach(MIMEText(html, "html", "utf-8"))
+    mensaje.attach(parte_alternativa)
+
+    for cid, contenido_png in imagenes.items():
+        imagen = MIMEImage(contenido_png)
+        imagen.add_header("Content-ID", f"<{cid}>")
+        imagen.add_header("Content-Disposition", "inline", filename=f"{cid}.png")
+        mensaje.attach(imagen)
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as servidor:
         servidor.login(gmail_user, gmail_password)
@@ -502,13 +704,13 @@ def main() -> None:
     fecha_referencia = pd.Timestamp(datetime.now().date())
     inicio_semana, fin_semana = _limites_semana(fecha_referencia)
 
-    html = construir_informe_html(df, fecha_referencia)
+    html, imagenes = construir_informe_html(df, fecha_referencia)
     asunto = (
         f"🏋️ Informe semanal del gimnasio — "
         f"{inicio_semana.strftime('%d/%m')} al {fin_semana.strftime('%d/%m/%Y')}"
     )
 
-    enviar_email(asunto, html)
+    enviar_email(asunto, html, imagenes)
     print(f"Email enviado correctamente a {os.environ['EMAIL_TO']}")
 
 
