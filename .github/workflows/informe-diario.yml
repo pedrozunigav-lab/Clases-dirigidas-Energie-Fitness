@@ -35,7 +35,9 @@ jobs:
           python-version: "3.11"
 
       - name: Instalar dependencias
-        run: pip install pandas numpy google-api-python-client google-auth
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy google-api-python-client google-auth matplotlib
 
       - name: Ejecutar informe semanal
         env:
