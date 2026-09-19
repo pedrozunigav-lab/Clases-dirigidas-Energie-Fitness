@@ -494,9 +494,10 @@ def bloque_comparativa_monitor_combinada(
 
 def bloque_comparativa_semanal_actividades(df: pd.DataFrame, fecha_referencia: pd.Timestamp) -> str:
     """
-    Tabla: % de ocupación por actividad (ya excluidas las no deseadas),
-    semana anterior vs. semana actual, con las fechas de cada semana y la
-    variación en puntos porcentuales.
+    Tabla: % de ocupación por monitor + actividad (ya excluidas las no
+    deseadas), semana anterior vs. semana actual, con las fechas de cada
+    semana y la variación en puntos porcentuales. Ordenada por monitor y,
+    dentro de cada monitor, por ocupación de esta semana descendente.
     """
     inicio_actual, fin_actual = _limites_semana(fecha_referencia)
     inicio_anterior, fin_anterior = _limites_semana(fecha_referencia - pd.Timedelta(days=7))
@@ -507,24 +508,35 @@ def bloque_comparativa_semanal_actividades(df: pd.DataFrame, fecha_referencia: p
     if df_actual.empty:
         return "<p>No hay clases registradas esta semana.</p>"
 
-    resumen_actual = df_actual.groupby("Nombre_Clase")["Pct_Ocupacion"].mean().round(1)
-    resumen_anterior = df_anterior.groupby("Nombre_Clase")["Pct_Ocupacion"].mean().round(1)
+    resumen_actual = df_actual.groupby(["Nombre_Monitor", "Nombre_Clase"])["Pct_Ocupacion"].mean().round(1)
+    resumen_anterior = df_anterior.groupby(["Nombre_Monitor", "Nombre_Clase"])["Pct_Ocupacion"].mean().round(1)
+
+    # Orden: por monitor (alfabético) y, dentro de cada uno, por ocupación
+    # de esta semana de mayor a menor.
+    indice_ordenado = sorted(
+        resumen_actual.index,
+        key=lambda clave: (clave[0], -resumen_actual[clave]),
+    )
 
     filas = []
-    for clase, ocupacion_actual in resumen_actual.sort_values(ascending=False).items():
-        ocupacion_anterior = resumen_anterior.get(clase, np.nan)
+    for monitor, clase in indice_ordenado:
+        ocupacion_actual = resumen_actual[(monitor, clase)]
+        ocupacion_anterior = resumen_anterior.get((monitor, clase), np.nan)
         if pd.notna(ocupacion_anterior):
             delta = round(ocupacion_actual - ocupacion_anterior, 1)
             flecha = "🔺" if delta >= 0 else "🔻"
             delta_txt = f"{flecha} {delta:+.1f} p.p."
         else:
             delta_txt = "— (sin datos la semana pasada)"
-        filas.append((clase, _fmt_pct(ocupacion_anterior), _fmt_pct(ocupacion_actual), delta_txt))
+        filas.append((monitor, clase, _fmt_pct(ocupacion_anterior), _fmt_pct(ocupacion_actual), delta_txt))
 
     encabezado_anterior = f"% Ocup. semana anterior ({inicio_anterior.strftime('%d/%m')}–{fin_anterior.strftime('%d/%m')})"
     encabezado_actual = f"% Ocup. semana actual ({inicio_actual.strftime('%d/%m')}–{fin_actual.strftime('%d/%m')})"
 
-    return _tabla_html(["Actividad", encabezado_anterior, encabezado_actual, "Variación"], filas)
+    return _tabla_html(
+        ["Entrenador", "Actividad", encabezado_anterior, encabezado_actual, "Variación"],
+        filas,
+    )
 
 
 def construir_narrativa(df: pd.DataFrame, fecha_referencia: pd.Timestamp, monitores_activos: list) -> str:
