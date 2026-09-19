@@ -99,7 +99,8 @@ MAPEO_COLUMNAS_ALTERNATIVAS = {
 # Edita esta lista si cambian los nombres exactos en el CSV.
 ACTIVIDADES_EXCLUIDAS = {
     "motivaction be ready",
-    "motivactions despegue",
+    "motivaction despegue",
+    "motivaction impulso",
     "presoterapia",
     "tour",
     "entrenamiento personal",
@@ -429,19 +430,10 @@ def calcular_metricas(df: pd.DataFrame) -> pd.DataFrame:
     # Reservas totales = quien acabó asistiendo + quien canceló a última hora
     df["Reservas_Totales"] = df["Asistentes_Reales"] + df["Cancelaciones_Última_Hora"]
 
-    # % de Ocupación = Presentes / Inscritos (si el CSV trae "Inscritos";
-    # si no, se usa la capacidad máxima como respaldo, como en el dataset
-    # sintético de demo, que no tiene esa columna)
-    if "Inscritos" in df.columns:
-        df["Pct_Ocupacion"] = np.where(
-            df["Inscritos"] > 0,
-            (df["Asistentes_Reales"] / df["Inscritos"] * 100).round(2),
-            0.0,
-        )
-    else:
-        df["Pct_Ocupacion"] = (
-            df["Asistentes_Reales"] / df["Capacidad_Máxima_Clase"] * 100
-        ).round(2)
+    # % de Ocupación = Presentes / Plazas disponibles (capacidad máxima) * 100
+    df["Pct_Ocupacion"] = (
+        df["Asistentes_Reales"] / df["Capacidad_Máxima_Clase"] * 100
+    ).round(2)
 
     # Tasa de cancelación = cancelaciones / reservas totales
     df["Tasa_Cancelacion"] = np.where(
