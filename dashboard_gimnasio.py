@@ -104,6 +104,7 @@ ACTIVIDADES_EXCLUIDAS = {
     "presoterapia",
     "tour",
     "entrenamiento personal",
+    "spinergie virtual",
 }
 
 
