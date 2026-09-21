@@ -1,0 +1,50 @@
+# ==============================================================================
+# Workflow: Tendencia semanal de ocupación por entrenador
+# ------------------------------------------------------------------------------
+# Ejecuta informe_tendencia_semanal.py cada LUNES a las 16:00 (hora de
+# España), analizando la semana que acaba de terminar. Es un email SEPARADO
+# del informe de los viernes (informe-semanal.yml) — no lo sustituye, así
+# que tendrás dos correos distintos cada semana.
+#
+# CONFIGURACIÓN: usa los mismos 5 secretos que ya tienes configurados para
+# el informe semanal (GOOGLE_SERVICE_ACCOUNT_JSON, DRIVE_FOLDER_ID,
+# GMAIL_USER, GMAIL_APP_PASSWORD, EMAIL_TO) — no hace falta tocarlos.
+#
+# NOTA sobre la hora: el cron de GitHub Actions va en UTC. La línea de abajo
+# (0 15 * * 1) dispara los lunes a las 16:00 en horario de invierno en
+# España (UTC+1). En horario de verano (UTC+2) se adelantará una hora, es
+# decir, se enviará a las 15:00 en vez de las 16:00 — si te importa la
+# precisión exacta todo el año, tendrías que cambiar el cron dos veces al
+# año (a "0 14 * * 1" en horario de verano).
+# ==============================================================================
+
+name: Tendencia semanal de ocupación
+
+on:
+  schedule:
+    - cron: "0 15 * * 1"
+  workflow_dispatch: {}  # permite lanzarlo manualmente desde la pestaña "Actions" para probar
+
+jobs:
+  enviar-informe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependencias
+        run: pip install pandas numpy matplotlib google-api-python-client google-auth
+
+      - name: Ejecutar informe de tendencia semanal
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python informe_tendencia_semanal.py
