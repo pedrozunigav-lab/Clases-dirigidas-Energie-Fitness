@@ -763,7 +763,13 @@ def main() -> None:
     df_raw = cargar_datos()
     df = calcular_metricas(df_raw)
 
-    fecha_referencia = pd.Timestamp(datetime.now().date())
+    # "fecha_referencia" se usa para calcular TODO (semana, mes, año) en el
+    # resto del informe. Restamos 7 días a la fecha de hoy para que la
+    # "semana actual" del informe sea siempre la última semana COMPLETA
+    # (lunes a domingo anteriores a hoy) — así da igual qué día de la
+    # semana se lance el workflow, nunca mostrará una semana a medias ni en
+    # blanco.
+    fecha_referencia = pd.Timestamp(datetime.now().date()) - pd.Timedelta(days=7)
     inicio_semana, fin_semana = _limites_semana(fecha_referencia)
 
     html, imagenes = construir_informe_html(df, fecha_referencia)
