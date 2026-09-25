@@ -276,22 +276,17 @@ _COLORES_LINEAS = [
 ]
 
 
-def grafico_lineas_monitor(datos_monitor: pd.DataFrame, monitor: str, semanas_ventana: int = 12) -> bytes:
+def grafico_lineas_monitor(datos_monitor: pd.DataFrame, monitor: str) -> bytes:
     """
     Gráfico de líneas: % ocupación semana a semana, una línea por cada
     actividad que imparte el monitor, más una línea de "Promedio general"
-    (más gruesa y discontinua). Se muestran las últimas `semanas_ventana`
-    semanas con datos, para que el gráfico no se sature con todo el
-    histórico.
+    (más gruesa y discontinua). `datos_monitor` ya viene recortado a la
+    ventana de tiempo deseada (ver construir_informe_html).
     """
     pivote = datos_monitor.pivot_table(
         index="Semana_Inicio", columns="Nombre_Clase", values="Pct_Ocupacion", aggfunc="mean"
     ).sort_index()
     promedio = datos_monitor.groupby("Semana_Inicio")["Pct_Ocupacion"].mean().sort_index()
-
-    if len(pivote) > semanas_ventana:
-        pivote = pivote.tail(semanas_ventana)
-        promedio = promedio.tail(semanas_ventana)
 
     fig, ax = plt.subplots(figsize=(9, 4.8))
     for i, actividad in enumerate(pivote.columns):
@@ -350,9 +345,12 @@ def construir_informe_html(df: pd.DataFrame, fecha_referencia: pd.Timestamp):
     if not monitores_activos:
         bloques_monitor.append("<p>No hay entrenadores con actividades registradas en la semana analizada.</p>")
     else:
-        # Solo se usa el histórico HASTA el final de la semana analizada,
-        # para que el gráfico no incluya datos de días posteriores al envío.
-        df_historico = df[df["Fecha_Hora"] <= fin_semana_objetivo]
+        # Ventana de 3 meses de calendario hasta el final de la semana
+        # analizada (no un número fijo de semanas), para que el gráfico
+        # muestre siempre "los últimos 3 meses" tal cual, sin importar
+        # cuántas sesiones haya en ese periodo.
+        inicio_ventana = fin_semana_objetivo - pd.DateOffset(months=3)
+        df_historico = df[(df["Fecha_Hora"] > inicio_ventana) & (df["Fecha_Hora"] <= fin_semana_objetivo)]
         for i, monitor in enumerate(monitores_activos):
             datos_monitor = df_historico[df_historico["Nombre_Monitor"] == monitor]
             cid = f"grafico_tendencia_{i}"
